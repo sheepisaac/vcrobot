@@ -13,6 +13,44 @@ This repository contains:
 The code was developed for experiments where multiple vcrobot units must start
 robot motion or camera capture from a server PC with low timing skew.
 
+## Hardware and third-party notices
+
+This project is designed around the following hardware used in the vcrobot
+research setup:
+
+- **WAVESHARE UGV / mobile-base hardware**
+- **WAVESHARE RoArm-style JSON serial command protocol**
+- **Intel RealSense RGB camera hardware**
+
+The control scripts send JSON commands that are compatible with the
+WAVESHARE-style robot controller protocol used by the target robots. For
+example, drive commands are sent in JSON form such as:
+
+```json
+{"T":1,"L":0.1,"R":0.1}
+```
+
+and arm commands use RoArm-style JSON command IDs such as `T=104`, `T=105`,
+`T=112`, and `T=210`.
+
+The RealSense capture path uses the camera as a V4L2 video device and records
+frames through FFmpeg. The current V4L2 capture scripts do not vendor Intel
+RealSense SDK source code. Earlier experimental ROS 2 / RealSense scripts are
+kept under `realsense_scripts/old/` for reference.
+
+Third-party names, hardware, firmware, protocols, SDKs, and tools remain under
+their respective owners' terms:
+
+- WAVESHARE hardware, firmware, documentation, and JSON command protocols are
+  owned by WAVESHARE or their respective right holders. This repository only
+  sends compatible commands for interoperability and does not include
+  WAVESHARE firmware/source code.
+- Intel RealSense hardware and Intel RealSense SDK / librealsense are owned by
+  Intel / RealSense project maintainers. The upstream librealsense SDK is
+  distributed under the Apache License 2.0.
+- FFmpeg and Linux V4L2 utilities are external runtime dependencies and are not
+  redistributed by this repository.
+
 ## Repository layout
 
 ```text
