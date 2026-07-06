@@ -1,0 +1,74 @@
+# Shared parameters for V4L2/ffmpeg synchronized RealSense capture.
+#
+# Copy this file to both:
+#   - Server PC: /mnt/c/Research/vcrobot/scripts/realsense_scripts/input_parameters.txt
+#   - Each robot: ~/realsense_scripts/input_parameters.txt
+#
+# Command-line options still override values in this file.
+
+[master]
+robots = 192.168.10.201 192.168.10.202 192.168.10.204
+expected = 3
+port = 50322
+target_frames = 10
+width = 1920
+height = 1080
+fps = 30
+input_format = yuyv422
+output_pix_fmt = yuv420p
+color_range = pc
+colorspace = bt709
+color_primaries = bt709
+color_trc = bt709
+in_range = pc
+in_color_matrix = bt709
+lead = 2.0
+timeout = 90
+capture_timeout = 60
+sync_samples = 25
+clock_mode = estimated
+ptp_max_offset_ms = 1.0
+output_dir = ./Results
+
+[slave]
+listen = 0.0.0.0
+port = 50322
+device = /dev/video6
+width = 1920
+height = 1080
+fps = 30
+input_format = yuyv422
+output_pix_fmt = yuv420p
+color_range = pc
+colorspace = bt709
+color_primaries = bt709
+color_trc = bt709
+in_range = pc
+in_color_matrix = bt709
+output_dir = ./Results
+no_showinfo = true
+keep_alive = false
+control_strict = true
+ready_frames = 90
+ring_frames = 300
+
+[camera_controls]
+# Restore RealSense/V4L2 default-like RGB controls.
+# Do not force manual exposure/gain/color tuning; let the camera use its
+# default auto exposure pipeline as much as possible.  Some robots reject
+# gain/sharpness writes while auto exposure is enabled.
+# Keep exposure_auto_priority=0 so frame rate remains fixed at 30 fps.
+white_balance_temperature_auto = 1
+exposure_auto = 3
+exposure_auto_priority = 0
+power_line_frequency = 1
+
+# Leave these unset unless doing a controlled calibration run.
+# gain = 256
+# sharpness = 50
+# brightness = 0
+# contrast = 50
+# saturation = 50
+# hue = 0
+# gamma = 300
+# backlight_compensation = 128
