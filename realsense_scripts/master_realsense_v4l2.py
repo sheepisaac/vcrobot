@@ -3,7 +3,9 @@
 
 import argparse
 import json
+import math
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -40,10 +42,10 @@ def re_split_commas_spaces(value):
 def parse_parameter_file(path):
     parameters = {}
     path = Path(path)
-    if not path.exists():
-        return parameters
+    if not path.is_file():
+        raise FileNotFoundError(f"Parameter file not found: {path.resolve()}")
     current_section = None
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
+    for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or line.startswith(";"):
             continue
@@ -83,7 +85,7 @@ def endpoints(args):
 
 def parse_args():
     pre_parser = argparse.ArgumentParser(add_help=False)
-    pre_parser.add_argument("--params", default="input_parameters.txt")
+    pre_parser.add_argument("--params", default=str(SCRIPT_DIR / "input_parameters.txt"))
     pre_args, _ = pre_parser.parse_known_args()
     params = parse_parameter_file(pre_args.params)
     master = params.get("master", {})
@@ -118,6 +120,8 @@ def parse_args():
     parser.add_argument("--lead", type=float, default=float(master.get("lead", 2.0)))
     parser.add_argument("--timeout", type=float, default=float(master.get("timeout", 90.0)))
     parser.add_argument("--capture-timeout", type=float, default=float(master.get("capture_timeout", 60.0)))
+    parser.add_argument("--ready-timeout", type=float, default=float(master.get("ready_timeout", 60.0)),
+                        help="wait for all cameras to finish warmup/stability checks before scheduling")
     parser.add_argument("--sync-samples", type=int, default=int(master.get("sync_samples", 25)))
     parser.add_argument("--clock-mode", choices=("estimated", "ptp"), default=master.get("clock_mode", "estimated"))
     parser.add_argument("--ptp-max-offset-ms", type=float, default=float(master.get("ptp_max_offset_ms", 1.0)))
@@ -131,8 +135,51 @@ def parse_args():
         parser.error("--lead must be at least 0.2")
     if args.sync_samples < 3:
         parser.error("--sync-samples must be at least 3")
+    for name in ("ready_timeout", "capture_timeout", "timeout", "fps", "lead"):
+        if not math.isfinite(getattr(args, name)) or getattr(args, name) <= 0:
+            parser.error(f"{name} must be finite and positive")
+    print(f"Parameters: {Path(args.params).resolve()}", flush=True)
     args.capture_frames = auto_capture_frames(args.target_frames)
     return args
+
+
+def wait_for_cameras(master, timeout):
+    """Readiness barrier precedes dispatch's clock sync and common start time."""
+    deadline = time.monotonic() + timeout
+    previous = {}
+    print("Waiting for every camera to finish warmup and image stabilization...", flush=True)
+    while True:
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"Camera readiness timed out after {timeout}s: {previous}")
+        # Ask all slaves before collecting replies; readiness never opens a camera.
+        saved_timeouts = [robot.socket.gettimeout() for robot in master.robots]
+        try:
+            for robot in master.robots:
+                robot.socket.settimeout(max(.01, min(2.0, deadline - time.monotonic())))
+                robot.send({"type": "camera_status"})
+            statuses = []
+            for robot in master.robots:
+                robot.socket.settimeout(max(.01, min(2.0, deadline - time.monotonic())))
+                reply, _ = robot.receive()
+                if reply.get("type") != "camera_status":
+                    raise RuntimeError(f"{robot.endpoint}: update slave_realsense_v4l2.py; "
+                                       f"expected camera_status, got {reply}")
+                if reply.get("stream_error"):
+                    raise RuntimeError(f"{robot.endpoint}: {reply['stream_error']}")
+                state = (reply.get("ready"), reply.get("reason"))
+                if previous.get(robot.endpoint) != state:
+                    print(f"  {robot.endpoint}: {state[1]}; "
+                          f"frames_seen={reply.get('frames_seen')}; "
+                          f"mean_y={reply.get('mean_y')}", flush=True)
+                    previous[robot.endpoint] = state
+                statuses.append(reply)
+        finally:
+            for robot, old_timeout in zip(master.robots, saved_timeouts):
+                robot.socket.settimeout(old_timeout)
+        if statuses and all(status.get("ready") is True for status in statuses):
+            print("ALL CAMERAS READY. Scheduling capture from the running streams.", flush=True)
+            return statuses
+        time.sleep(min(.25, max(0.0, deadline - time.monotonic())))
 
 
 def print_report(results):
@@ -155,6 +202,8 @@ def print_report(results):
             f"frames={capture.get('saved_frames', capture.get('showinfo_frames'))}/"
             f"{capture.get('target_frames', capture.get('frame_count'))} "
             f"size={capture.get('file_size_bytes')} "
+            f"camera_ready={capture.get('camera_ready')} "
+            f"startup_discarded={capture.get('startup_frames_discarded')} "
             f"start_late_ms={capture.get('start_late_ms')}"
         )
     if len(start_lates) > 1:
@@ -203,11 +252,22 @@ def main():
         args.clock_mode, args.ptp_max_offset_ms
     )
     try:
+        wait_for_cameras(master, args.ready_timeout)
+        # Date/time belongs to this ready capture, not the start of warmup.
+        session_dt = datetime.now()
+        command.update(session_date=session_dt.strftime("%Y%m%d"),
+                       session_time=session_dt.strftime("%H%M"),
+                       session_stamp=session_dt.strftime("%Y%m%d_%H%M"))
+        print(f"Capture session timestamp: {command['session_stamp']}", flush=True)
         results = master.dispatch(
             [(0.0, "v4l2_realsense", json.dumps(command, separators=(",", ":")))],
             args.lead, report=False
         )
         print_report(results)
+        if any(not (item.get("verification") or {}).get("success") or
+               (item.get("verification", {}).get("capture") or {}).get("saved_frames") != args.target_frames
+               for item in results):
+            raise RuntimeError("Capture failed: not every robot saved the requested frame count; see report")
     finally:
         master.close()
 

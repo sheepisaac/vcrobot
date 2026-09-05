@@ -25,6 +25,8 @@ in_color_matrix = bt709
 lead = 2.0
 timeout = 90
 capture_timeout = 60
+# Separate deadline for camera warmup; it never consumes target_frames.
+ready_timeout = 60
 sync_samples = 25
 clock_mode = estimated
 ptp_max_offset_ms = 1.0
@@ -50,6 +52,15 @@ no_showinfo = true
 keep_alive = false
 control_strict = true
 ready_frames = 90
+# All criteria must pass before the master can schedule capture.
+# The stability window starts AFTER the minimum warmup (at least 7 s total).
+warmup_seconds = 5.0
+stable_seconds = 2.0
+# Allowed max-min of sampled frame means in 8-bit Y/U/V code values.
+luma_tolerance = 3.0
+chroma_tolerance = 2.0
+# Reject near-black startup images; lower only for intentionally dark scenes.
+min_luma = 25.0
 ring_frames = 300
 
 [camera_controls]
