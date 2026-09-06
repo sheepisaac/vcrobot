@@ -113,11 +113,17 @@ class ArmSerial:
     def _write_watchdog_command(self, command):
         data = command.rstrip("\r\n").encode() + b"\n"
         with self.lock:
+            # A motion command may have extended the quiet window while the
+            # watchdog was waiting for this lock. Recheck before touching UART.
+            if (self.stop_event.is_set() or
+                    time.monotonic() < self.quiet_until_monotonic):
+                return False
             if self.serial is None and not self.dry_run:
                 raise OSError("arm serial is disconnected")
             if self.serial is not None:
                 self.serial.write(data)
                 self.serial.flush()
+            return True
 
     def write_at(self, command, execute_at_ns):
         """Reserve the serial writer just before a deadline, then dispatch on it."""
@@ -309,16 +315,14 @@ class ArmSerial:
                 else:
                     if time.monotonic() < self.quiet_until_monotonic:
                         continue
-                    # UGV/cart motion can cause brief controller brownout or a
-                    # low-torque/adaptive state without a clean USB disconnect.
-                    # Keep T=210 frequent, but avoid spamming T=112 because it
-                    # is a mode/config command and can be more intrusive.
+                    # This fallback cannot prevent torque-OFF commands from
+                    # another controller. Ordinary drive stops must avoid T=0.
                     now = time.monotonic()
                     if (self.defa_restore_interval > 0.0 and
                             now - self.last_defa_restore_monotonic >=
                             self.defa_restore_interval):
-                        self._write_watchdog_command(DEFA_OFF_COMMAND)
-                        self.last_defa_restore_monotonic = now
+                        if self._write_watchdog_command(DEFA_OFF_COMMAND):
+                            self.last_defa_restore_monotonic = now
                     self._write_watchdog_command(TORQUE_ON_COMMAND)
             except Exception as exc:
                 print(f"Torque watchdog reconnecting after error: {exc}", flush=True)

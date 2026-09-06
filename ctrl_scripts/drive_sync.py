@@ -11,7 +11,10 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 PROTOCOL_VERSION = 2
-STOP_COMMAND = '{"T":0}'
+# Ordinary drive stop: leave the independently controlled arm energized.
+STOP_COMMAND = '{"T":1,"L":0.0,"R":0.0}'
+# Preserve the existing global safety-stop behavior on disconnect/fault/shutdown.
+EMERGENCY_STOP_COMMAND = '{"T":0}'
 TAI_CLOCK_ID = getattr(time, "CLOCK_TAI", 11)
 
 
@@ -38,6 +41,7 @@ def normalize_drive_command(command):
     if not isinstance(value, dict) or value.get("T") not in (0, 1):
         raise ValueError("drive command must be T=0 or T=1 JSON")
     if value["T"] == 0:
+        # Older drive masters use T=0 for an ordinary stop key/command.
         return STOP_COMMAND, 0.0, 0.0
     left, right = float(value["L"]), float(value["R"])
     if not (-1.0 <= left <= 1.0 and -1.0 <= right <= 1.0):
@@ -58,7 +62,7 @@ class DriveSerial:
     def __init__(self, mode, port, baudrate, timeout, dry_run,
                  keepalive, ramp_step, reverse_deadtime):
         self.mode = mode
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.state_lock = threading.Lock()
         self.stop_event = threading.Event()
         self.keepalive = keepalive
@@ -81,6 +85,8 @@ class DriveSerial:
                                         exclusive=True)
             print(f"Drive serial opened: {port} @ {baudrate} mode={mode}", flush=True)
         self._write(STOP_COMMAND)
+        print("Ordinary drive stop: T=1 L=0 R=0 (arm torque unchanged); "
+              "disconnect/fault/shutdown still uses global T=0", flush=True)
         self.worker = threading.Thread(target=self._background, daemon=True)
         self.worker.start()
 
@@ -140,43 +146,52 @@ class DriveSerial:
         return actual_clock_ns
 
     def emergency_stop(self, reason):
-        with self.state_lock:
-            self.target_left = self.target_right = 0.0
-            self.current_left = self.current_right = 0.0
-            self.current_command = STOP_COMMAND
-            self.next_ramp_at = time.monotonic()
-        try:
-            self._write(STOP_COMMAND)
-            print(f"EMERGENCY STOP: {reason}", flush=True)
-        except Exception as exc:
-            print(f"EMERGENCY STOP write failed: {exc}", flush=True)
+        # Keep global T=0 for safety stops. Serialize with the ramp writer so
+        # a previously selected movement packet cannot be sent after the stop.
+        with self.lock:
+            with self.state_lock:
+                self.target_left = self.target_right = 0.0
+                self.current_left = self.current_right = 0.0
+                self.current_command = EMERGENCY_STOP_COMMAND
+                self.next_ramp_at = time.monotonic()
+            try:
+                self._write(EMERGENCY_STOP_COMMAND)
+                print(f"EMERGENCY STOP: {reason}", flush=True)
+            except Exception as exc:
+                print(f"EMERGENCY STOP write failed: {exc}", flush=True)
 
     def _background(self):
         previous = STOP_COMMAND
         while not self.stop_event.wait(0.002):
             try:
-                with self.state_lock:
-                    now = time.monotonic()
-                    if (self.mode == "cart" and now >= self.reverse_allowed_at and
-                            now >= self.next_ramp_at):
-                        steps = max(1, int((now - self.next_ramp_at) /
-                                           self.ramp_interval) + 1)
-                        for _ in range(steps):
-                            self.current_left = move_toward(
-                                self.current_left, self.target_left, self.ramp_step)
-                            self.current_right = move_toward(
-                                self.current_right, self.target_right, self.ramp_step)
-                        self.next_ramp_at += steps * self.ramp_interval
-                        self.current_command = self._format(
-                            self.current_left, self.current_right)
-                    command = self.current_command
-                if (command != previous or
-                        time.monotonic() - self.last_write >= self.keepalive):
-                    self._write(command)
-                    previous = command
+                previous = self._background_step(previous)
             except Exception as exc:
                 print(f"Drive writer stopped: {exc}", flush=True)
                 self.stop_event.set()
+
+    def _background_step(self, previous):
+        with self.lock:
+            with self.state_lock:
+                now = time.monotonic()
+                if (self.current_command != EMERGENCY_STOP_COMMAND and
+                        self.mode == "cart" and now >= self.reverse_allowed_at and
+                        now >= self.next_ramp_at):
+                    steps = max(1, int((now - self.next_ramp_at) /
+                                       self.ramp_interval) + 1)
+                    for _ in range(steps):
+                        self.current_left = move_toward(
+                            self.current_left, self.target_left, self.ramp_step)
+                        self.current_right = move_toward(
+                            self.current_right, self.target_right, self.ramp_step)
+                    self.next_ramp_at += steps * self.ramp_interval
+                    self.current_command = self._format(
+                        self.current_left, self.current_right)
+                command = self.current_command
+            if (command != previous or
+                    time.monotonic() - self.last_write >= self.keepalive):
+                self._write(command)
+                return command
+            return previous
 
     def close(self):
         self.stop_event.set()

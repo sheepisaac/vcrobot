@@ -12,7 +12,9 @@ KEEPALIVE_INTERVAL = 0.5
 
 # 전역 변수
 # ctrl_rovering2.py와 유사하게 정지 명령으로 초기화
-current_command = '{"T":0}'
+# Ordinary stop preserves arm torque; shutdown retains the global T=0 stop.
+STOP_COMMAND = '{"T":1,"L":0.0,"R":0.0}'
+current_command = STOP_COMMAND
 command_lock = threading.Lock() # current_command 접근 동기화를 위한 Lock
 exit_event = threading.Event()  # 스레드 종료 신호를 위한 Event
 
@@ -32,7 +34,7 @@ def cmd_parser(cmd_input_str):
     cmd_type = parts[0]
 
     if cmd_type == "stop":
-        return '{"T":0}' # 유효한 JSON 형식의 정지 명령
+        return STOP_COMMAND
     elif cmd_type == "go":
         if len(parts) == 3:
             try:

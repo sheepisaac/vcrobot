@@ -32,7 +32,8 @@ def target_from_keys():
 
 def generate_command(left, right):
     if left == 0.0 and right == 0.0:
-        return '{"T":0}'
+        # Ordinary stop only; T=0 also releases bus-servo torque on UGV.
+        return '{"T":1,"L":0.0,"R":0.0}'
     return f'{{"T":1,"L":{left:.3f},"R":{right:.3f}}}'
 
 

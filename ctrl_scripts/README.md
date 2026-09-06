@@ -19,8 +19,49 @@ Default serial devices:
 Each slave opens its serial port in exclusive mode. Do not run two scripts that
 try to use the same serial device at the same time. For example,
 `slave_ugv.py` and `slave_cartRider.py` both use `/dev/ttyS0`, so they should not
-run together. `slave_armSimple.py` can run together with either drive slave
-because it uses `/dev/ttyUSB0`.
+run together. `slave_armSimple.py` uses `/dev/ttyUSB0`, but different Linux port
+names alone do not prove the firmware/servo bus is independent.
+
+## ArmSimple + CartRider torque-loss fix
+
+Ordinary drive stops now send `{"T":1,"L":0.0,"R":0.0}`. Previously, drive
+startup, idle keepalives, normal stops and direction reversal sent `{"T":0}`.
+On official WAVESHARE UGV firmware, T=0 stops the wheels AND calls
+`emergencyStopProcessing()`, broadcasting torque OFF to servo ID 254.
+The drive's 0.5-second idle keepalive could therefore fight the arm's T=210
+torque ON watchdog and repeatedly release/recover the arm.
+
+Sources: [command handler](https://github.com/waveshareteam/ugv_base_ros/blob/main/ROS_Driver/uart_ctrl.h),
+[servo implementation](https://github.com/waveshareteam/ugv_base_ros/blob/main/ROS_Driver/RoArm-M2_module.h).
+Installed firmware and wiring still need robot-side confirmation.
+
+Legacy T=0 ordinary commands from older drive masters are translated to the
+wheel-only stop. Both drive masters import the stop constant through
+`drive_master_sync.py`, so their interfaces are unchanged. Original standalone
+`ctrl_cartRider.py` and `ctrl_ugv.py` ordinary stops are fixed as well.
+
+**Safety behavior retained:** disconnect, heartbeat timeout and slave shutdown
+still use the existing global T=0 emergency stop, which can release arm torque.
+The existing arm watchdog recovery policy is also unchanged. Look for
+`EMERGENCY STOP` in the drive terminal if release still occurs after updating.
+This patch changes ordinary drive stops, not the fault/shutdown safety policy.
+
+Drive state selection and UART writes are serialized so a stale background
+movement packet cannot follow an emergency stop. The arm watchdog rechecks its
+motion quiet window after acquiring the serial lock.
+
+Deploy updated `drive_sync.py` and `slave_arm.py` to `~/ctrl_scripts/` on every
+robot and restart both slaves. Update `drive_sync.py` on the PC too. Wrapper
+scripts require no edits. Copy the original `ctrl_cartRider.py`/`ctrl_ugv.py`
+if using those standalone controllers.
+
+For the physical test, support the arm against unexpected drops, start armSimple,
+then cartRider, first leave the wheels idle and then test normal stop/reverse.
+No robot is moved by the regression tests:
+
+```bash
+python3 -m unittest discover -s ctrl_scripts -p 'test_drive_arm_coexistence.py' -v
+```
 
 ## Arm control
 
